@@ -143,11 +143,20 @@ tests/          # 34 теста, включая прогон хендлеров 
 Dockerfile      # multi-stage, non-root, работает с readOnlyRootFilesystem
 ```
 
-## Тесты
+## Разработка
 
 ```bash
-uv run pytest
+uv sync --all-groups        # зависимости вместе с dev-группой
+uv run pre-commit install   # хуки на коммит
+uv run ruff check . && uv run ruff format .
+uv run pre-commit run --all-files
+uv run pytest               # тесты
 ```
+
+Набор хуков тот же, что в `rtt-monitoring`: базовые проверки pre-commit-hooks
+(trailing-whitespace, end-of-file-fixer, check-yaml с `--allow-multiple-documents`
+под манифесты k8s, check-toml, large-files, merge-conflict, debug-statements,
+detect-private-key), `ruff-check --fix`, `ruff-format` и `uv-lock`.
 
 ## Деплой в k3s через GitHub Actions
 

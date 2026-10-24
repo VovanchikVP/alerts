@@ -55,6 +55,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Без этой проверки пустой секрет проявляется невнятно: wg-quick падает на
+      # пустом конфиге, а kubectl уходит на дефолтный localhost:8080.
+      - name: Проверить, что секреты заданы
+        env:
+          WG_CONFIG: ${{ secrets.WG_CONFIG }}
+          KUBE_API: ${{ secrets.KUBE_API }}
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          ALERTS_BOT_TOKEN: ${{ secrets.ALERTS_BOT_TOKEN }}
+          ALERTS_INGEST_API_KEY: ${{ secrets.ALERTS_INGEST_API_KEY }}
+        run: |
+          missing=""
+          for name in WG_CONFIG KUBE_API KUBE_CONFIG ALERTS_BOT_TOKEN ALERTS_INGEST_API_KEY; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Не заданы секреты репозитория:$missing"
+            echo "Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
+          echo "все обязательные секреты на месте"
+
       - uses: azure/setup-kubectl@v4
 
       - name: Подключиться к сети WireGuard
@@ -67,9 +88,39 @@ jobs:
           sudo wg show
 
       - name: Проверить, что API кластера виден
+        env:
+          KUBE_API: ${{ secrets.KUBE_API }}
         run: |
-          host=$(echo "${{ secrets.KUBE_API }}" | sed -E 's#https?://##; s#/.*##')
-          nc -z -w 5 "${host%%:*}" "${host##*:}" && echo "кластер доступен: $host"
+          host=$(echo "$KUBE_API" | sed -E 's#https?://##; s#/.*##')
+          addr=${host%%:*}
+          port=${host##*:}
+          if [ "$addr" = "$port" ] || ! echo "$port" | grep -qE '^[0-9]+$'; then
+            echo "::error::KUBE_API должен быть вида 10.8.0.2:6443 — сейчас порт не распознан"
+            exit 1
+          fi
+
+          # первый хендшейк занимает пару секунд, поэтому не одна попытка
+          ok=""
+          for _ in $(seq 1 10); do
+            nc -z -w3 "$addr" "$port" && { ok=1; break; }
+            sleep 2
+          done
+
+          echo "--- состояние туннеля ---"
+          sudo wg show
+          echo "--- маршруты через туннель ---"
+          ip route | grep -E "wg0|10\.8\." || echo "маршрутов через wg0 нет"
+
+          if [ -z "$ok" ]; then
+            echo "::error::$addr:$port недоступен через туннель"
+            echo "Если выше в 'latest handshake' пусто — сервер не принял пир:"
+            echo "  на сервере WG: sudo wg show wg0 | grep -A3 <публичный ключ раннера>"
+            echo "  пир должен быть с allowed ips 10.8.0.51/32"
+            echo "Если хендшейк есть, а порт не отвечает — на сервере нет forward/NAT"
+            echo "для 10.8.0.51 (правила могут быть написаны только под 10.8.0.50)"
+            exit 1
+          fi
+          echo "кластер доступен: $addr:$port"
 
       - name: Установить kustomize
         run: |
@@ -80,10 +131,23 @@ jobs:
           sudo install kustomize /usr/local/bin/kustomize
 
       - name: Подложить kubeconfig
+        id: kubeconfig
         run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          if ! grep -q "^kind: Config" ~/.kube/config; then
+            echo "::error::KUBE_CONFIG не похож на kubeconfig — проверьте, что секрет содержит вывод base64 без переносов строк"
+            exit 1
+          fi
+          server=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}')
+          echo "сервер из kubeconfig: $server"
+          case "$server" in
+            *127.0.0.1*|*localhost*)
+              echo "::error::В kubeconfig адрес $server — он недоступен с раннера, нужен адрес в сети WG (10.8.0.2:6443)"
+              exit 1
+              ;;
+          esac
           kubectl version --output=yaml
 
       - name: Namespace
@@ -128,11 +192,11 @@ jobs:
         run: kubectl -n "$NAMESPACE" rollout status deployment/alerts-bot --timeout=180s
 
       - name: Состояние после выкатки
-        if: always()
+        if: always() && steps.kubeconfig.outcome == 'success'
         run: kubectl -n "$NAMESPACE" get pods -o wide
 
       - name: Логи пода при сбое
-        if: failure()
+        if: failure() && steps.kubeconfig.outcome == 'success'
         run: |
           kubectl -n "$NAMESPACE" describe deployment/alerts-bot || true
           kubectl -n "$NAMESPACE" logs deployment/alerts-bot --tail=100 --all-containers || true
