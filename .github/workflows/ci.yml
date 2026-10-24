@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  lint:
+    name: Линтеры и форматтер
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Поставить зависимости
+        run: uv sync --frozen --all-groups
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+  tests:
+    name: Тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Поставить зависимости
+        run: uv sync --frozen --all-groups
+
+      # Токен бота и ключ API не нужны: Telegram подменён фейковой сессией,
+      # а настройки тесты создают сами.
+      - name: pytest
+        run: uv run pytest -q
+
+  manifests:
+    name: Манифесты k8s
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Собрать kustomize-оверлей
+        run: kubectl kustomize deploy/k8s > /dev/null
+
+      - name: Проверить скрипт выпуска kubeconfig
+        run: bash -n deploy/ci/make-kubeconfig.sh

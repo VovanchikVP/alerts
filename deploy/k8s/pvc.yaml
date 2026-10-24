@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alerts-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # local-path — штатный storage class k3s. Том привязан к ноде, на которой
+  # запустился под: SQLite здесь живёт одной репликой и миграций между нодами не ждёт.
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerts-bot
+  labels:
+    app.kubernetes.io/name: alerts-bot
+spec:
+  # Одна реплика — обязательна: long polling Telegram не терпит двух читателей
+  # одного бота, а SQLite лежит на RWO-томе.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerts-bot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alerts-bot
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: bot
+          image: alerts-bot  # реальный образ и тег подставляет kustomization.yaml
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ALERTS_DB_PATH
+              value: /data/alerts.db
+            - name: ALERTS_API_HOST
+              value: 0.0.0.0
+            - name: ALERTS_API_PORT
+              value: "8080"
+          envFrom:
+            - secretRef:
+                name: alerts-secrets
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: alerts-data
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alerts-bot
+  annotations:
+    # Traefik идёт в k3s из коробки. Раскомментируйте, если настроен cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  # Хост подставляется в CI из переменной ALERTS_INGRESS_HOST, иначе остаётся этот.
+  rules:
+    - host: alerts.home
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: alerts-bot
+                port:
+                  name: http
+  tls:
+    - hosts: ["alerts.example.com"]
+      secretName: alerts-bot-tls

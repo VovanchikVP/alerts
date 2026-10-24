@@ -1,0 +1,142 @@
+name: CD
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: alerts
+
+jobs:
+  build:
+    name: Сборка и публикация образа
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Имя образа в нижнем регистре
+        id: meta
+        run: echo "image=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Логин в GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Собрать и запушить
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # для k3s на ARM добавьте linux/arm64 — сборка пойдёт через QEMU
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Выкатка в k3s
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+
+      - name: Подключиться к сети WireGuard
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools
+          echo "${{ secrets.WG_CONFIG }}" | base64 -d | sudo tee /etc/wireguard/wg0.conf > /dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          sudo wg show
+
+      - name: Проверить, что API кластера виден
+        run: |
+          host=$(echo "${{ secrets.KUBE_API }}" | sed -E 's#https?://##; s#/.*##')
+          nc -z -w 5 "${host%%:*}" "${host##*:}" && echo "кластер доступен: $host"
+
+      - name: Установить kustomize
+        run: |
+          version=v5.5.0
+          curl -sSLo kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${version}/kustomize_${version}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install kustomize /usr/local/bin/kustomize
+
+      - name: Подложить kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl version --output=yaml
+
+      - name: Namespace
+        run: kubectl apply -f deploy/k8s/namespace.yaml
+
+      - name: Секреты приложения
+        run: |
+          kubectl create secret generic alerts-secrets \
+            --namespace "$NAMESPACE" \
+            --from-literal=ALERTS_BOT_TOKEN='${{ secrets.ALERTS_BOT_TOKEN }}' \
+            --from-literal=ALERTS_INGEST_API_KEY='${{ secrets.ALERTS_INGEST_API_KEY }}' \
+            --from-literal=ALERTS_OUTBOUND_TOKEN='${{ secrets.ALERTS_OUTBOUND_TOKEN }}' \
+            --from-literal=ALERTS_OUTBOUND_SECRET='${{ secrets.ALERTS_OUTBOUND_SECRET }}' \
+            --from-literal=ALERTS_ALLOWED_CHAT_IDS='${{ vars.ALERTS_ALLOWED_CHAT_IDS }}' \
+            --from-literal=ALERTS_DEFAULT_CALLBACK_URL='${{ vars.ALERTS_DEFAULT_CALLBACK_URL }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Секрет для приватного образа GHCR
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        if: env.GHCR_PULL_TOKEN != ''
+        run: |
+          kubectl create secret docker-registry ghcr-pull \
+            --namespace "$NAMESPACE" \
+            --docker-server="$REGISTRY" \
+            --docker-username='${{ github.actor }}' \
+            --docker-password="$GHCR_PULL_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Подставить тег образа и хост Ingress
+        working-directory: deploy/k8s
+        run: |
+          kustomize edit set image alerts-bot=${{ needs.build.outputs.image }}:${{ github.sha }}
+          if [ -n "${{ vars.ALERTS_INGRESS_HOST }}" ]; then
+            sed -i "s|alerts.example.com|${{ vars.ALERTS_INGRESS_HOST }}|g" ingress.yaml
+          fi
+
+      - name: Накатить манифесты
+        run: kustomize build deploy/k8s | kubectl apply -f -
+
+      - name: Дождаться выкатки
+        run: kubectl -n "$NAMESPACE" rollout status deployment/alerts-bot --timeout=180s
+
+      - name: Состояние после выкатки
+        if: always()
+        run: kubectl -n "$NAMESPACE" get pods -o wide
+
+      - name: Логи пода при сбое
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" describe deployment/alerts-bot || true
+          kubectl -n "$NAMESPACE" logs deployment/alerts-bot --tail=100 --all-containers || true
+
+      - name: Отключиться от WireGuard
+        if: always()
+        run: sudo wg-quick down wg0 || true

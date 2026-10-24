@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.db
+*.db-wal
+*.db-shm
+.env
+.git/
+.github/
+.pytest_cache/
+tests/
+examples/
+deploy/
+README.md
