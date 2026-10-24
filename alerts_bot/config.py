@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # и «-100123,987» из окружения уронит старт ещё до валидатора ниже.
     allowed_chat_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
 
+    # Прокси до api.telegram.org, если прямой выход закрыт:
+    # http://user:pass@host:3128 или socks5://host:1080
+    telegram_proxy: str | None = None
+
     # --- HTTP API, принимающее алерты с сервера ---
     api_host: str = "0.0.0.0"
     api_port: int = 8080

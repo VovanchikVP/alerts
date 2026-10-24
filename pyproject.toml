@@ -5,6 +5,7 @@ description = "Telegram bot: receives alerts from servers and sends back operato
 requires-python = ">=3.13"
 dependencies = [
     "aiogram>=3.15",
+    "aiohttp-socks>=0.10",
     "aiosqlite>=0.20",
     "fastapi>=0.115",
     "httpx>=0.27",

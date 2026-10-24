@@ -190,6 +190,7 @@ detect-private-key), `ruff-check --fix`, `ruff-format` и `uv-lock`.
 | `ALERTS_ALLOWED_CHAT_IDS` | `-1001234567890,987654` |
 | `ALERTS_DEFAULT_CALLBACK_URL` | `https://ops.example.com/hooks/telegram-action` |
 | `ALERTS_INGRESS_HOST` | `alerts.example.com` |
+| `ALERTS_TELEGRAM_PROXY` | `http://proxy.local:3128` — только если из кластера нет прямого выхода на `api.telegram.org` |
 
 Плюс Environment `production` — можно повесить ручное подтверждение выкатки.
 
@@ -454,7 +455,20 @@ kubectl auth can-i delete nodes --as=system:serviceaccount:alerts:alerts-deploye
 - `Service` ClusterIP :8080 и `Ingress` на Traefik для `/api` — именно туда ваши серверы
   шлют алерты;
 - пробы на `/healthz`: приём алертов поднимается независимо от Telegram, поэтому обрыв
-  связи с `api.telegram.org` не делает под not-ready — polling переподключается сам.
+  связи с `api.telegram.org` не делает под not-ready — polling переподключается сам
+  с экспоненциальной паузой до минуты.
+
+Если в логах пода висит `polling оборвался (... Request timeout error)`, значит из кластера
+не достучаться до Telegram. Проверить прямо в поде:
+
+```bash
+kubectl -n alerts exec deploy/alerts-bot -- python -c "import socket; print(socket.gethostbyname('api.telegram.org'))"
+kubectl -n alerts exec deploy/alerts-bot -- python -c "import urllib.request; print(urllib.request.urlopen('https://api.telegram.org', timeout=10).status)"
+```
+
+Имя не резолвится — проблема в CoreDNS; резолвится, но запрос висит до таймаута — исходящий
+трафик режет файрвол. Во втором случае задайте переменную `ALERTS_TELEGRAM_PROXY`
+(`http://`, `socks4://`, `socks5://`, можно с логином) — бот пойдёт в Telegram через неё.
 
 Образ — `ghcr.io/<owner>/alerts:<sha>`, тег по коммиту, поэтому откат это
 `kubectl -n alerts rollout undo deployment/alerts-bot`. Для k3s на ARM добавьте

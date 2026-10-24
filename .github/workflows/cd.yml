@@ -163,6 +163,7 @@ jobs:
             --from-literal=ALERTS_OUTBOUND_SECRET='${{ secrets.ALERTS_OUTBOUND_SECRET }}' \
             --from-literal=ALERTS_ALLOWED_CHAT_IDS='${{ vars.ALERTS_ALLOWED_CHAT_IDS }}' \
             --from-literal=ALERTS_DEFAULT_CALLBACK_URL='${{ vars.ALERTS_DEFAULT_CALLBACK_URL }}' \
+            --from-literal=ALERTS_TELEGRAM_PROXY='${{ vars.ALERTS_TELEGRAM_PROXY }}' \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Секрет для приватного образа GHCR

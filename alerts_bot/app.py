@@ -8,8 +8,9 @@ import httpx
 import uvicorn
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramNetworkError, TelegramServerError
 from aiogram.types import BotCommand
 
 from .actions import ActionDispatcher
@@ -40,9 +41,40 @@ async def _preflight(bot: Bot) -> None:
             await bot.set_my_commands(COMMANDS)
             me = await bot.get_me()
     except (TelegramAPIError, TimeoutError) as exc:
-        log.warning("Telegram недоступен на старте (%s); polling подключится сам", exc)
+        log.warning(
+            "Telegram недоступен на старте (%s: %s); polling подключится сам",
+            type(exc).__name__,
+            exc,
+        )
     else:
         log.info("бот подключён как @%s", me.username)
+
+
+async def _polling_forever(dp: Dispatcher, bot: Bot) -> None:
+    """Long polling с переподключением.
+
+    `start_polling` вызывает getMe до входа в цикл обновлений, и этот вызов не защищён
+    внутренним backoff aiogram: без обёртки недоступный Telegram роняет весь процесс, а в
+    k8s — уводит под в CrashLoopBackOff вместе с приёмом алертов.
+    """
+    delay = 5
+    while True:
+        try:
+            await dp.start_polling(bot, handle_signals=False)
+            return
+        except (TelegramNetworkError, TelegramServerError) as exc:
+            log.warning("polling оборвался (%s), повтор через %s с", exc, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
+def _build_bot(settings: Settings) -> Bot:
+    session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None
+    return Bot(
+        token=settings.bot_token,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
 
 async def run(settings: Settings | None = None) -> None:
@@ -51,10 +83,7 @@ async def run(settings: Settings | None = None) -> None:
     storage = Storage(settings.db_path)
     await storage.connect()
 
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot = _build_bot(settings)
     notifier = Notifier(bot, storage)
     http_client = httpx.AsyncClient(follow_redirects=True)
 
@@ -84,7 +113,7 @@ async def run(settings: Settings | None = None) -> None:
         )
 
         tasks = {
-            asyncio.create_task(dp.start_polling(bot, handle_signals=False), name="telegram"),
+            asyncio.create_task(_polling_forever(dp, bot), name="telegram"),
             asyncio.create_task(api.serve(), name="api"),
         }
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
